@@ -1,4 +1,4 @@
-# 🔐 Secure File Storage System with AES-256
+# Secure File Storage System with AES-256
 
 A simple yet powerful **local file encryption and decryption system** built in Python using AES-256-GCM for confidentiality and integrity protection.
 
@@ -6,7 +6,7 @@ This project allows you to securely encrypt any file, store it as `.enc`, and la
 
 ---
 
-## 📋 Features
+## Features
 
 - **AES-256-GCM Encryption** — Strong, authenticated encryption for confidentiality and integrity.
 - **PBKDF2 Key Derivation** — Password-based key stretching with unique salt per file.
@@ -17,7 +17,7 @@ This project allows you to securely encrypt any file, store it as `.enc`, and la
 
 ---
 
-## 🧰 Tools & Libraries
+## Tools & Libraries
 
 - **Language:** Python 3
 - **Library:** `cryptography`
@@ -25,7 +25,7 @@ This project allows you to securely encrypt any file, store it as `.enc`, and la
 
 ---
 
-## ⚙️ Installation
+## Installation
 
 Make sure you have Python 3 and `pip` installed.
 
@@ -47,14 +47,6 @@ python3 secure_store.py decrypt <input_file.enc> <output_file>
 Enter the same passphrase used for encryption.
 The script will verify file integrity automatically.
 
-## Security Notes
-
-Your passphrase is never stored — losing it means permanent data loss.
-Each file uses a unique salt and nonce.
-AES-GCM provides authentication; the SHA-256 hash adds extra verification.
-To remove original plaintext securely (optional):
-
-shred -u filename.txt
 
 ## Summary
 
