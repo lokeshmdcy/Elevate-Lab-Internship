@@ -49,5 +49,5 @@ hashcat -m 0 -a 0 hashes.txt alice_rex.txt
 # john the ripper
 john --wordlist=alice_rex.txt --rules myhashes.txt
 
-
+## Summary
 The analyzer evaluates individual passwords and returns a score, entropy estimate, and human-readable feedback where possible.
