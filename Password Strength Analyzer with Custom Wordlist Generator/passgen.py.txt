@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""
+passgen.py
+Password Strength Analyzer + Custom Wordlist Generator
+Usage (CLI):
+  python passgen.py --name "Alice" --pet "rex" --date "1995-06-12" --keywords "acme,admin" --out wordlist.txt
+  python passgen.py --password "P@ssw0rd123"                # score a password
+  python passgen.py --gui                                  # open GUI
+"""
+
+import argparse
+import itertools
+import os
+import sys
+import time
+from datetime import datetime
+from typing import List, Set
+
+# Optional imports
+try:
+    from zxcvbn import zxcvbn
+    HAS_ZXCVBN = True
+except Exception:
+    HAS_ZXCVBN = False
+
+try:
+    import nltk
+    from nltk.tokenize import word_tokenize
+    HAS_NLTK = True
+except Exception:
+    HAS_NLTK = False
+
+# ---- Configurable constants ----
+DEFAULT_YEARS_RANGE = (1980, datetime.now().year)  # append years from 1980..current year
+COMMON_SUFFIXES = ["!", "?", ".", "_", "-", "123", "321", "202", "2020"]
+COMMON_PREFIXES = ["", "!", "@", "#", "123"]
+LEET_MAP = {
+    'a': ['a', '@', '4'],
+    'b': ['b', '8'],
+    'e': ['e', '3'],
+    'i': ['i', '1', '!'],
+    'l': ['l', '1', '|'],
+    'o': ['o', '0'],
+    's': ['s', '$', '5'],
+    't': ['t', '7'],
+    'g': ['g', '9'],
+    'z': ['z', '2'],
+}
+
+# A tiny embedded list of common passwords / patterns for seeding (expandable)
+EMBEDDED_COMMONS = [
+    "password", "123456", "qwerty", "letmein", "welcome",
+    "admin", "user", "login", "pass", "default"
+]
+
+# ---- Utility functions ----
+def simple_entropy(password: str) -> float:
+    """Rough entropy estimate (bits) based on charset size and length."""
+    charset = 0
+    if any(c.islower() for c in password): charset += 26
+    if any(c.isupper() for c in password): charset += 26
+    if any(c.isdigit() for c in password): charset += 10
+    if any(not c.isalnum() for c in password): charset += 32
+    if charset == 0: return 0.0
+    import math
+    return len(password) * (math.log(charset, 2))
+
+def assess_password(password: str, user_inputs: List[str] = None) -> dict:
+    """Return a dict with assessment data using zxcvbn if available."""
+    if user_inputs is None:
+        user_inputs = []
+    if HAS_ZXCVBN:
+        try:
+            res = zxcvbn(password, user_inputs)
+            return {
+                "score": res.get("score"),
+                "crack_times_display": res.get("crack_times_display"),
+                "entropy": res.get("entropy"),
+                "feedback": res.get("feedback"),
+                "sequence": res.get("sequence"),
+            }
+        except Exception:
+            pass
+    # fallback
+    ent = simple_entropy(password)
+    score = 0
+    if ent > 60: score = 4
+    elif ent > 40: score = 3
+    elif ent > 28: score = 2
+    elif ent > 20: score = 1
+    else: score = 0
+    return {
+        "score": score,
+        "entropy": ent,
+        "crack_times_display": {"offline_fast_hashing_1e10_per_second": "unknown (fallback)"},
+        "feedback": {"warning": "zxcvbn not available; fallback entropy used."},
+        "sequence": []
+    }
+
+# ---- Wordlist generation ----
+def normalize_input_fields(name=None, date=None, pet=None, keywords=None, company=None):
+    parts = []
+    if name:
+        # split multi-part names
+        for token in name.replace(',', ' ').split():
+            if token.strip():
+                parts.append(token.strip())
+    if pet:
+        for token in pet.replace(',', ' ').split():
+            if token.strip():
+                parts.append(token.strip())
+    if company:
+        for token in company.replace(',', ' ').split():
+            if token.strip():
+                parts.append(token.strip())
+    if keywords:
+        for token in (keywords.split(',') if isinstance(keywords, str) else keywords):
+            token = token.strip()
+            if token:
+                parts.append(token)
+    # date can be YYYY-MM-DD or YYYY
+    if date:
+        parts.append(date)
+        # also extract year/month/day parts
+        try:
+            dt = datetime.fromisoformat(date)
+            parts.append(str(dt.year))
+            parts.append(dt.strftime("%Y%m%d"))
+            parts.append(dt.strftime("%d%m%Y"))
+        except Exception:
+            # maybe just year
+            if len(date) == 4 and date.isdigit():
+                parts.append(date)
+    # add embedded common seeds
+    parts.extend(EMBEDDED_COMMONS)
+    # dedupe keeping order
+    seen=set(); out=[]
+    for p in parts:
+        lp = p.lower()
+        if lp not in seen:
+            seen.add(lp)
+            out.append(p)
+    return out
+
+def case_variants(word: str) -> Set[str]:
+    """Return a small set of case variants (lower, upper, title, camel)."""
+    variants = {word.lower(), word.upper(), word.capitalize()}
+    # also mixed simple variants (first two upper)
+    if len(word) > 1:
+        variants.add(word[0].upper() + word[1:].lower())
+    return variants
+
+def leet_variants(word: str, max_variants=12) -> Set[str]:
+    """Generate leetspeak variants but cap count to avoid explosion."""
+    chars = []
+    for ch in word.lower():
+        if ch in LEET_MAP:
+            chars.append(LEET_MAP[ch])
+        else:
+            chars.append([ch])
+    # build small product but cap
+    variants = set()
+    count = 0
+    for prod in itertools.product(*chars):
+        variants.add(''.join(prod))
+        count += 1
+        if count >= max_variants:
+            break
+    return variants
+
+def append_years(words: Set[str], start_year=DEFAULT_YEARS_RANGE[0], end_year=DEFAULT_YEARS_RANGE[1], max_append=5):
+    out = set()
+    years = [str(y) for y in range(end_year, start_year-1, -1)]
+    years = years[:max_append]
+    for w in words:
+        out.add(w)
+        for y in years:
+            out.add(w + y)
+            out.add(y + w)
+            out.add(w + y[-2:])  # two-digit year
+    return out
+
+def append_symbols(words: Set[str], symbols=COMMON_SUFFIXES):
+    out = set()
+    for w in words:
+        out.add(w)
+        for s in symbols:
+            out.add(w + s)
+            out.add(s + w)
+    return out
+
+def permute_words(words: List[str], max_len=2):
+    """Permute combinations of words up to length max_len (e.g., name+pet)."""
+    out = set()
+    for r in range(1, max_len+1):
+        for combo in itertools.permutations(words, r):
+            out.add(''.join(combo))
+            out.add('_'.join(combo))
+            out.add('-'.join(combo))
+    return out
+
+def generate_wordlist(user_fields: dict,
+                      leet=True,
+                      years_range=DEFAULT_YEARS_RANGE,
+                      include_common=True,
+                      append_symbols_flag=True,
+                      max_words=50000) -> List[str]:
+    """
+    user_fields: dict with keys name, date, pet, keywords, company
+    returns a list of words (deduped)
+    """
+    seeds = normalize_input_fields(**user_fields)
+    # base words: seeds + permutations
+    base_perms = permute_words(seeds, max_len=2)
+    base = set(seeds) | base_perms
+    # case variants + leet (if enabled)
+    words = set()
+    for w in base:
+        for v in case_variants(w):
+            words.add(v)
+        if leet:
+            for lv in leet_variants(w):
+                for cv in case_variants(lv):
+                    words.add(cv)
+    # append years
+    words = append_years(words, start_year=years_range[0], end_year=years_range[1], max_append=10)
+    # append symbols
+    if append_symbols_flag:
+        words = append_symbols(words)
+    # optionally include embedded commons (already included in seeds)
+    # limit size
+    words_list = list(words)
+    # sort by length then lexicographically (shorter first)
+    words_list.sort(key=lambda x: (len(x), x))
+    if max_words and len(words_list) > max_words:
+        words_list = words_list[:max_words]
+    return words_list
+
+# ---- File write ----
+def save_wordlist(words: List[str], out_file: str):
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for w in words:
+            f.write(w + '\n')
+
+# ---- CLI & GUI ----
+def parse_args():
+    p = argparse.ArgumentParser(description="Password Strength Analyzer & Custom Wordlist Generator")
+    p.add_argument('--name', help="Full name(s), comma or space separated", default=None)
+    p.add_argument('--pet', help="Pet name(s)", default=None)
+    p.add_argument('--company', help="Company / employer", default=None)
+    p.add_argument('--date', help="Date or year (YYYY or YYYY-MM-DD) - e.g., birthdate", default=None)
+    p.add_argument('--keywords', help="Extra keywords, comma separated", default=None)
+    p.add_argument('--password', help="Password to assess (interactive assessment mode)", default=None)
+    p.add_argument('--out', '-o', help="Output filename for wordlist (txt)", default="wordlist.txt")
+    p.add_argument('--max', type=int, help="Max number of generated words", default=20000)
+    p.add_argument('--no-leet', action='store_true', help="Disable leetspeak variants")
+    p.add_argument('--start-year', type=int, default=DEFAULT_YEARS_RANGE[0])
+    p.add_argument('--end-year', type=int, default=DEFAULT_YEARS_RANGE[1])
+    p.add_argument('--gui', action='store_true', help="Launch a simple Tkinter GUI")
+    return p.parse_args()
+
+def run_cli(args):
+    user_fields = {
+        "name": args.name,
+        "pet": args.pet,
+        "company": args.company,
+        "date": args.date,
+        "keywords": args.keywords
+    }
+    if args.password:
+        print("Assessing password:", args.password)
+        inputs = [v for v in user_fields.values() if v]
+        res = assess_password(args.password, inputs)
+        print("Score (0-4):", res.get("score"))
+        print("Entropy:", res.get("entropy"))
+        print("Crack time estimates:", res.get("crack_times_display"))
+        fb = res.get("feedback")
+        if fb:
+            print("Feedback:", fb)
+    # generate wordlist
+    print("Generating wordlist...")
+    words = generate_wordlist(user_fields,
+                              leet=not args.no_leet,
+                              years_range=(args.start_year, args.end_year),
+                              max_words=args.max)
+    save_wordlist(words, args.out)
+    print(f"Saved {len(words)} entries to {args.out}")
+
+# --- Simple Tkinter GUI ---
+def run_gui():
+    try:
+        import tkinter as tk
+        from tkinter import ttk, messagebox, filedialog
+    except Exception as e:
+        print("tkinter not available. Install it on your system to use the GUI.", file=sys.stderr)
+        return
+
+    root = tk.Tk()
+    root.title("Password Analyzer & Wordlist Generator")
+    frm = ttk.Frame(root, padding=12)
+    frm.grid()
+    # inputs
+    labels = [("Name(s):", "name"), ("Pet(s):", "pet"), ("Company:", "company"),
+              ("Date (YYYY or YYYY-MM-DD):", "date"), ("Keywords (comma):", "keywords")]
+    vars = {}
+    row = 0
+    for label, key in labels:
+        ttk.Label(frm, text=label).grid(column=0, row=row, sticky='w')
+        v = tk.StringVar()
+        ttk.Entry(frm, width=40, textvariable=v).grid(column=1, row=row)
+        vars[key] = v
+        row += 1
+
+    outfile_var = tk.StringVar(value="wordlist.txt")
+    ttk.Label(frm, text="Output file:").grid(column=0, row=row, sticky='w')
+    ttk.Entry(frm, width=40, textvariable=outfile_var).grid(column=1, row=row)
+    row += 1
+
+    leet_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(frm, text="Enable leetspeak variants", variable=leet_var).grid(column=0, row=row, columnspan=2, sticky='w')
+    row += 1
+
+    max_var = tk.IntVar(value=20000)
+    ttk.Label(frm, text="Max words:").grid(column=0, row=row, sticky='w')
+    ttk.Entry(frm, width=12, textvariable=max_var).grid(column=1, row=row, sticky='w')
+    row += 1
+
+    status = tk.StringVar(value="Ready")
+    ttk.Label(frm, textvariable=status).grid(column=0, row=row, columnspan=2, sticky='w')
+    row += 1
+
+    def generate_action():
+        status.set("Generating...")
+        root.update_idletasks()
+        user_fields = {k: v.get() or None for k, v in vars.items()}
+        try:
+            words = generate_wordlist(user_fields, leet=leet_var.get(), max_words=max_var.get())
+            path = outfile_var.get()
+            save_wordlist(words, path)
+            status.set(f"Saved {len(words)} words to {path}")
+            messagebox.showinfo("Done", f"Saved {len(words)} words to {path}")
+        except Exception as e:
+            status.set("Error")
+            messagebox.showerror("Error", str(e))
+
+    def assess_action():
+        # open tiny prompt
+        import simpledialog
+        pwd = simpledialog.askstring("Assess password", "Enter password to assess:", show="*")
+        if not pwd:
+            return
+        inputs = [v.get() for v in vars.values() if v.get()]
+        res = assess_password(pwd, inputs)
+        msg = f"Score: {res.get('score')}\nEntropy: {res.get('entropy')}\n"
+        ct = res.get('crack_times_display')
+        if ct:
+            msg += "Crack estimates:\n"
+            for k, v in ct.items():
+                msg += f"  {k}: {v}\n"
+        messagebox.showinfo("Assessment", msg)
+
+    ttk.Button(frm, text="Generate Wordlist", command=generate_action).grid(column=0, row=row, sticky='w')
+    ttk.Button(frm, text="Assess Password", command=assess_action).grid(column=1, row=row, sticky='e')
+    row += 1
+
+    root.mainloop()
+
+# ---- Main entrypoint ----
+if __name__ == "__main__":
+    args = parse_args()
+    if args.gui:
+        run_gui()
+        sys.exit(0)
+    run_cli(args)
